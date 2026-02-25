@@ -1,4 +1,4 @@
-# Polymarket Wallet Tracker
+# Polymarket Wallets Tracker
 
 Discover and follow profitable Polymarket traders. Includes a Python API client library and a terminal dashboard (TUI).
 
