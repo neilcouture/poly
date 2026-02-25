@@ -27,6 +27,8 @@ Three-panel layout: leaderboard, positions detail, and PnL chart.
 | Key | Action |
 |-----|--------|
 | `1` `2` `3` `4` | Switch period: All Time / Week / Month / Day |
+| `5` | Active (AT) — All-time leaderboard filtered to wallets active this week |
+| `a` | Trader analysis — shows quality metrics (monotonicity, drawdown, diversification, efficiency) |
 | `b` | Set copy-trade budget |
 | `s` | Search wallets |
 | `f` | Toggle favorite |
@@ -35,6 +37,15 @@ Three-panel layout: leaderboard, positions detail, and PnL chart.
 | `q` | Quit |
 
 Select a wallet from the leaderboard to see its positions and PnL curve. Set a budget to simulate copy-trading at proportional scale.
+
+### Trader Analysis (`a`)
+
+Shows a modal with 4 quality metrics for the selected wallet:
+
+- **Monotonicity** — % of days where cumulative PnL increased (consistency signal)
+- **Max Drawdown** — largest peak-to-trough drop as % of peak (risk measure)
+- **Diversification** — profitable markets vs total markets traded (concentration risk)
+- **Efficiency** — PnL per trade (skill signal)
 
 ## CLI
 
