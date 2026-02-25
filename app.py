@@ -31,9 +31,62 @@ from polymarket import (
     poly_wallet_pnl_history,
 )
 
-PERIODS = [("All Time", "all"), ("Week", "week"), ("Month", "month"), ("Day", "day")]
-PERIOD_SECONDS = {"day": 86400, "week": 7 * 86400, "month": 30 * 86400, "all": 0}
+PERIODS = [("All Time", "all"), ("Week", "week"), ("Month", "month"), ("Day", "day"), ("Active (AT)", "active")]
+PERIOD_SECONDS = {"day": 86400, "week": 7 * 86400, "month": 30 * 86400, "all": 0, "active": 0}
 FAVORITES_PATH = Path(__file__).parent / "favorites.json"
+
+
+def _compute_metrics(pnl: PnLHistory) -> dict:
+    """Compute trader quality metrics from a PnL curve."""
+    curve = pnl.curve
+
+    # Bucket curve into daily snapshots for monotonicity + drawdown
+    daily: dict[int, float] = {}  # day_key -> last cumulative_pnl
+    for pt in curve:
+        day_key = pt.timestamp // 86400
+        daily[day_key] = pt.cumulative_pnl
+    day_values = [v for _, v in sorted(daily.items())]
+
+    # Monotonicity: % of days where cumulative PnL increased
+    ups = 0
+    for i in range(1, len(day_values)):
+        if day_values[i] >= day_values[i - 1]:
+            ups += 1
+    intervals = len(day_values) - 1
+    monotonicity = (ups / intervals * 100) if intervals > 0 else 0.0
+
+    # Max drawdown %: largest peak-to-trough as % of peak (on daily values)
+    peak = 0.0
+    max_dd = 0.0
+    for v in day_values:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (peak - v) / peak
+            if dd > max_dd:
+                max_dd = dd
+    max_drawdown_pct = max_dd * 100
+
+    # Diversification: profitable markets / total markets
+    market_pnl: dict[str, float] = {}
+    for pt in curve:
+        if pt.event_type == "MTM":
+            continue
+        market_pnl.setdefault(pt.market_title, 0.0)
+        market_pnl[pt.market_title] += pt.usdc_amount
+    total_markets = len(market_pnl)
+    profitable_markets = sum(1 for v in market_pnl.values() if v > 0)
+
+    # PnL per trade
+    pnl_per_trade = pnl.mtm_pnl / pnl.total_trades if pnl.total_trades > 0 else 0.0
+
+    return {
+        "monotonicity": monotonicity,
+        "max_drawdown_pct": max_drawdown_pct,
+        "profitable_markets": profitable_markets,
+        "total_markets": total_markets,
+        "pnl_per_trade": pnl_per_trade,
+    }
 
 
 def _load_favorites() -> dict:
@@ -74,6 +127,69 @@ def _count_trades(wallet: str, period: str) -> int:
             break
         offset += page_size
     return count
+
+
+class AnalysisModal(ModalScreen[None]):
+    """Modal showing trader quality metrics."""
+
+    DEFAULT_CSS = """
+    AnalysisModal {
+        align: center middle;
+    }
+
+    #analysis-container {
+        width: 50;
+        height: auto;
+        background: #1a1a2e;
+        border: round #50c878;
+        border-title-color: #50c878;
+        border-title-style: bold;
+        padding: 1 2;
+    }
+
+    .metric-row {
+        height: auto;
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+        Binding("a", "cancel", "Close"),
+    ]
+
+    def __init__(self, metrics: dict, wallet_name: str) -> None:
+        super().__init__()
+        self._metrics = metrics
+        self._wallet_name = wallet_name
+
+    def compose(self) -> ComposeResult:
+        m = self._metrics
+        with Vertical(id="analysis-container") as v:
+            v.border_title = f" Analysis — {self._wallet_name} "
+            yield Static(
+                f"[bold green]{m['monotonicity']:.0f}%[/bold green] Monotonicity\n"
+                f"[dim]% of days PnL increased[/dim]",
+                classes="metric-row",
+            )
+            yield Static(
+                f"[bold magenta]-{m['max_drawdown_pct']:.1f}%[/bold magenta] Max Drawdown\n"
+                f"[dim]Largest drop from peak[/dim]",
+                classes="metric-row",
+            )
+            yield Static(
+                f"[bold cyan]{m['profitable_markets']}/{m['total_markets']}[/bold cyan] Diversification\n"
+                f"[dim]Markets won / total markets[/dim]",
+                classes="metric-row",
+            )
+            yield Static(
+                f"[bold yellow]{_fmt_usd(m['pnl_per_trade'])}[/bold yellow] Efficiency\n"
+                f"[dim]PnL per trade[/dim]",
+                classes="metric-row",
+            )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class FavoritesModal(ModalScreen[str | None]):
@@ -361,11 +477,13 @@ class PolyApp(App):
         Binding("2", "set_period('week')", "Week"),
         Binding("3", "set_period('month')", "Month"),
         Binding("4", "set_period('day')", "Day"),
+        Binding("5", "set_period('active')", "Active"),
         Binding("b", "focus_budget", "Budget"),
         Binding("r", "refresh_leaderboard", "Refresh"),
         Binding("s", "search", "Search"),
         Binding("f", "toggle_favorite", "Fav"),
         Binding("i", "show_favorites", "Favs"),
+        Binding("a", "toggle_analysis", "Analysis"),
     ]
 
     period: reactive[str] = reactive("all")
@@ -508,6 +626,17 @@ class PolyApp(App):
     def action_refresh_leaderboard(self) -> None:
         self._load_leaderboard()
 
+    def action_toggle_analysis(self) -> None:
+        if not self._current_pnl:
+            return
+        m = _compute_metrics(self._current_pnl)
+        name = self.selected_wallet[:12] if self.selected_wallet else "?"
+        for t in self._wallets:
+            if t.wallet == self.selected_wallet:
+                name = t.name or t.wallet[:12]
+                break
+        self.push_screen(AnalysisModal(m, name))
+
     def action_search(self) -> None:
         if not self._wallets:
             return
@@ -592,7 +721,35 @@ class PolyApp(App):
         period = self.period
         self.call_from_thread(self._set_wallet_count, "Loading...")
 
-        traders = poly_top_k(100, period=period)
+        if period == "active":
+            # Fetch all-time top wallets and weekly active wallets, then intersect
+            all_traders = poly_top_k(500, period="all")
+
+            if self.period != period:
+                return
+
+            self.call_from_thread(self._set_wallet_count, "Loading weekly active...")
+
+            week_traders = poly_top_k(2000, period="week")
+
+            if self.period != period:
+                return
+
+            # Keep all-time wallets that also appear on the weekly leaderboard
+            weekly_wallets = {t.wallet for t in week_traders}
+            active_traders = []
+            for t in all_traders:
+                if t.wallet in weekly_wallets:
+                    active_traders.append(TopTrader(
+                        rank=len(active_traders) + 1,
+                        wallet=t.wallet,
+                        name=t.name,
+                        pnl=t.pnl,
+                        volume=t.volume,
+                    ))
+            traders = active_traders
+        else:
+            traders = poly_top_k(100, period=period)
 
         # Check staleness
         if self.period != period:
