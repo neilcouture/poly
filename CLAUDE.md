@@ -18,6 +18,11 @@ python3 polymarket.py snapshot      # save leaderboard to SQLite (~48s for 10k w
 python3 polymarket.py movers        # rank changes between snapshots
 python3 polymarket.py interesting   # scored list of wallets worth following
 python3 polymarket.py pnl <wallet> [--budget N]  # PnL history / copy-trade sim
+python3 polymarket.py kelly 10000                # Kelly strategy scanner
+
+# Kelly scanner (standalone)
+python3 kelly.py 10000                           # scan favorites
+python3 kelly.py 5000 --wallets top50            # scan top 50 traders
 ```
 
 ## Dependencies
@@ -38,8 +43,16 @@ No API keys needed — all Polymarket and Polygon RPC endpoints are public.
 - Leaderboard table (top-left) with async trade count loading via ThreadPoolExecutor
 - Positions detail pane (top-right) with per-market stats merged from PnL curve + positions API
 - PnL chart (bottom, full width) using `textual-plotext`, with market highlight overlay
-- Modal screens for search (`s`) and favorites (`i`). Favorites persist to `favorites.json`
+- Modal screens for search (`s`), favorites (`i`), help (`h`), and Kelly batch scanner (`k`)
+- Positions table includes Edge/Kelly columns using Bayesian signal processing from trader win rate
+- Favorites persist to `favorites.json`
 - All data fetching runs in `@work(thread=True)` workers with staleness checks
+
+**`kelly.py`** — Kelly criterion trading strategy module:
+- `bayesian_update()` — sequential Bayes in log-odds space using trader win rate as signal accuracy
+- `kelly_fraction()` — half-Kelly position sizing, capped at 25% of bankroll
+- `scan_opportunities()` — batch scanner: fetches positions for tracked wallets, groups by market, computes Bayesian p-hat, sizes with Kelly
+- Integrated into positions detail pane (per-position Edge/Kelly) and available as standalone batch scanner
 
 ## Key Domain Concepts
 

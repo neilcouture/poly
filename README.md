@@ -28,15 +28,30 @@ Three-panel layout: leaderboard, positions detail, and PnL chart.
 |-----|--------|
 | `1` `2` `3` `4` | Switch period: All Time / Week / Month / Day |
 | `5` | Active (AT) — All-time leaderboard filtered to wallets active this week |
-| `a` | Trader analysis — shows quality metrics (monotonicity, drawdown, diversification, efficiency) |
-| `b` | Set copy-trade budget |
+| `a` | Trader analysis — quality metrics modal |
+| `b` | Set copy-trade budget (USDC bankroll for Kelly sizing) |
 | `s` | Search wallets |
 | `f` | Toggle favorite |
 | `i` | View favorites |
+| `k` | Kelly batch scanner — scan all favorites for cross-wallet opportunities |
 | `r` | Refresh leaderboard |
+| `h` | Full help screen |
 | `q` | Quit |
 
 Select a wallet from the leaderboard to see its positions and PnL curve. Set a budget to simulate copy-trading at proportional scale.
+
+### Kelly Criterion (Edge / Kelly columns)
+
+When you select a trader, the positions table shows **Edge** and **Kelly** columns for each open position. This uses Bayesian signal processing and the Kelly criterion for position sizing:
+
+1. Computes the trader's **actual win rate** from their PnL history (profitable markets / total markets) and uses it as their Bayesian signal accuracy.
+2. Starts with the market's **current price** as the prior probability (the crowd's belief).
+3. **Bayesian update**: if a trader with 68% win rate holds YES on a market priced at $0.55, the estimated true probability (p-hat) shifts upward to ~$0.63.
+4. **Edge** = p-hat minus market price — your informational advantage from knowing what a good trader holds.
+5. **Kelly fraction** = Edge / (1 - price), halved for safety (half-Kelly, capped at 25% of bankroll).
+6. With a **budget** set (press `b`), the Kelly column shows dollar amounts per position.
+
+The `k` batch scanner does this across ALL favorites simultaneously, finding markets where multiple tracked traders agree — more signals means a stronger Bayesian update and higher confidence.
 
 ### Trader Analysis (`a`)
 
@@ -55,7 +70,22 @@ python3 polymarket.py snapshot                    # save leaderboard snapshot to
 python3 polymarket.py movers                      # who's climbing/falling the ranks
 python3 polymarket.py interesting                  # scored list of wallets to follow
 python3 polymarket.py pnl <wallet> --budget 1000  # PnL history with copy-trade sim
+python3 polymarket.py kelly 10000                  # Kelly strategy scanner
 ```
+
+### Kelly Strategy Scanner
+
+```bash
+python3 kelly.py <bankroll> [options]
+
+python3 kelly.py 10000                       # scan favorites, $10K bankroll
+python3 kelly.py 5000 --wallets top50        # scan top 50 leaderboard traders
+python3 kelly.py 5000 --wallets interesting  # scan interesting wallets from snapshots
+python3 kelly.py 5000 --fraction 0.25        # quarter-Kelly (more conservative)
+python3 kelly.py 5000 --min-edge 0.05        # only show 5%+ edge opportunities
+```
+
+Scans tracked wallets' positions, groups by market, computes Bayesian p-hat from trader signals, and sizes bets with the Kelly criterion. Outputs a ranked list of opportunities with edge, Kelly fraction, and suggested bet size.
 
 ## Snapshot Workflow
 
@@ -105,3 +135,13 @@ print(f"Projected MTM: ${history.mtm_pnl:,.2f}")
 | `poly_snapshot(k, periods)` | Save leaderboard to SQLite |
 | `poly_movers(days, period)` | Rank changes between snapshots |
 | `interesting_wallets(min_weekly_pnl)` | Scored list of wallets worth following |
+
+### Kelly Functions (`kelly.py`)
+
+| Function | Description |
+|----------|-------------|
+| `kelly_fraction(p_hat, price, fraction)` | Kelly criterion for binary outcomes (half-Kelly default) |
+| `bayesian_update(prior, signals)` | Sequential Bayesian update in log-odds space |
+| `trader_accuracy(rank)` | Estimate signal accuracy from leaderboard rank |
+| `lmsr_slippage(shares, price, liquidity)` | LMSR second-order slippage estimate |
+| `scan_opportunities(wallets, bankroll)` | Full pipeline: fetch positions, Bayesian update, Kelly sizing |
