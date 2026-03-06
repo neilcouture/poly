@@ -1327,11 +1327,19 @@ if __name__ == "__main__":
             print(f"  Active positions: {profile.active_positions}")
             print(f"  Total PnL:        ${profile.total_pnl:>14,.2f}")
 
+    elif cmd == "kelly":
+        # Delegate to kelly.py with remaining args
+        import subprocess
+        subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "kelly.py")] + sys.argv[2:]
+        )
+
     else:
-        print("Usage: python polymarket.py [test|snapshot|movers|interesting|pnl]")
+        print("Usage: python polymarket.py [test|snapshot|movers|interesting|pnl|kelly]")
         print()
         print("  test                          Smoke test the basic API functions")
         print("  snapshot [k]                  Take a leaderboard snapshot (default k=10000)")
         print("  movers [days]                 Show who's climbing/falling (default 7 days)")
         print("  interesting                   Show interesting wallets to follow")
         print("  pnl <wallet> [--budget N]     PnL history (add --budget for copy-trade sim)")
+        print("  kelly <bankroll> [options]     Kelly strategy scanner (see kelly.py --help)")

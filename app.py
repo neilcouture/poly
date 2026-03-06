@@ -31,6 +31,14 @@ from polymarket import (
     poly_wallet_pnl_history,
 )
 
+from kelly import (
+    Opportunity,
+    bayesian_update,
+    kelly_fraction,
+    load_favorites,
+    scan_opportunities,
+)
+
 PERIODS = [("All Time", "all"), ("Week", "week"), ("Month", "month"), ("Day", "day"), ("Active (AT)", "active")]
 PERIOD_SECONDS = {"day": 86400, "week": 7 * 86400, "month": 30 * 86400, "all": 0, "active": 0}
 FAVORITES_PATH = Path(__file__).parent / "favorites.json"
@@ -97,6 +105,100 @@ def _load_favorites() -> dict:
 
 def _save_favorites(favs: dict) -> None:
     FAVORITES_PATH.write_text(json.dumps(favs, indent=2))
+
+
+class HelpModal(ModalScreen[None]):
+    """Modal showing full help for all commands."""
+
+    DEFAULT_CSS = """
+    HelpModal {
+        align: center middle;
+    }
+
+    #help-container {
+        width: 80;
+        max-height: 85%;
+        background: #1a1a2e;
+        border: round #6cb4ee;
+        border-title-color: #6cb4ee;
+        border-title-style: bold;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+
+    .help-section {
+        height: auto;
+        margin-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+        Binding("h", "cancel", "Close"),
+        Binding("question_mark", "cancel", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="help-container") as v:
+            v.border_title = " Help — Polymarket Tracker "
+            yield Static(
+                "[bold underline]NAVIGATION[/bold underline]\n"
+                "  [bold]1-5[/bold]       Switch leaderboard period "
+                "(All / Week / Month / Day / Active)\n"
+                "  [bold]Up/Down[/bold]   Navigate rows\n"
+                "  [bold]Enter[/bold]     Select wallet / expand position\n"
+                "  [bold]r[/bold]         Refresh leaderboard",
+                classes="help-section",
+            )
+            yield Static(
+                "[bold underline]WALLET ACTIONS[/bold underline]\n"
+                "  [bold]s[/bold]         Search wallets by name\n"
+                "  [bold]f[/bold]         Add/remove current wallet from favorites\n"
+                "  [bold]i[/bold]         Show favorites list (select to jump)\n"
+                "  [bold]b[/bold]         Focus budget input (USDC bankroll for copy-trade)",
+                classes="help-section",
+            )
+            yield Static(
+                "[bold underline]ANALYSIS[/bold underline]\n"
+                "  [bold]a[/bold]         Analysis modal — shows trader quality metrics:\n"
+                "              monotonicity, max drawdown, diversification, efficiency\n"
+                "  [bold]k[/bold]         Kelly batch scanner — scans ALL favorites for\n"
+                "              cross-wallet opportunities where multiple traders agree",
+                classes="help-section",
+            )
+            yield Static(
+                "[bold underline]KELLY CRITERION (Edge / Kelly columns)[/bold underline]\n\n"
+                "When you select a trader, their positions table shows [bold]Edge[/bold] and\n"
+                "[bold]Kelly[/bold] columns for each open position. Here's what it does:\n\n"
+                "1. Computes the trader's [bold]actual win rate[/bold] from their PnL history\n"
+                "   (profitable markets / total markets) and uses it as their Bayesian\n"
+                "   signal accuracy.\n\n"
+                "2. Starts with the market's [bold]current price[/bold] as the prior probability\n"
+                "   (what the crowd thinks).\n\n"
+                "3. [bold]Bayesian update[/bold]: if a trader with 68% win rate holds YES on a\n"
+                "   market priced at $0.55, the estimated true probability (p-hat) shifts\n"
+                "   upward to ~$0.63 — because this trader's judgment is informative.\n\n"
+                "4. [bold]Edge[/bold] = p-hat minus market price. This is your informational\n"
+                "   advantage from knowing what a good trader holds.\n\n"
+                "5. [bold]Kelly fraction[/bold] = Edge / (1 - price), halved for safety\n"
+                "   (half-Kelly, capped at 25% of bankroll per position).\n\n"
+                "6. With a [bold]budget[/bold] set (press b), the Kelly column shows dollar\n"
+                "   amounts: how much of your bankroll to allocate to copy each position.\n"
+                "   Without a budget, it shows the Kelly percentage.\n\n"
+                "[dim]The 'k' batch scanner does this across ALL favorites simultaneously,\n"
+                "finding markets where multiple tracked traders agree — more signals means\n"
+                "a stronger Bayesian update and higher confidence.[/dim]",
+                classes="help-section",
+            )
+            yield Static(
+                "[bold underline]GENERAL[/bold underline]\n"
+                "  [bold]h[/bold]         This help screen\n"
+                "  [bold]q[/bold]         Quit",
+                classes="help-section",
+            )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 def _count_trades(wallet: str, period: str) -> int:
@@ -187,6 +289,135 @@ class AnalysisModal(ModalScreen[None]):
                 f"[dim]PnL per trade[/dim]",
                 classes="metric-row",
             )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class KellyModal(ModalScreen[None]):
+    """Modal showing Kelly criterion trading opportunities."""
+
+    DEFAULT_CSS = """
+    KellyModal {
+        align: center middle;
+    }
+
+    #kelly-container {
+        width: 90%;
+        max-width: 100;
+        max-height: 85%;
+        background: #1a1a2e;
+        border: round #e8a838;
+        border-title-color: #e8a838;
+        border-title-style: bold;
+        padding: 1 2;
+    }
+
+    #kelly-header {
+        height: auto;
+        margin-bottom: 1;
+        color: #e8a838;
+    }
+
+    #kelly-table {
+        height: 1fr;
+        max-height: 25;
+        scrollbar-size: 1 1;
+    }
+
+    #kelly-detail {
+        height: auto;
+        margin-top: 1;
+        color: #50c878;
+    }
+
+    #kelly-footer {
+        height: auto;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+        Binding("k", "cancel", "Close"),
+    ]
+
+    def __init__(self, opportunities: list[Opportunity], bankroll: float) -> None:
+        super().__init__()
+        self._opportunities = opportunities
+        self._bankroll = bankroll
+        self._row_map: dict[int, int] = {}  # row_idx -> opp_idx
+
+    def compose(self) -> ComposeResult:
+        n = len(self._opportunities)
+        total_bet = sum(o.bet_size for o in self._opportunities)
+        with Vertical(id="kelly-container") as v:
+            v.border_title = " Kelly Strategy Scanner "
+            yield Static(
+                f"[bold]Bankroll:[/bold] {_fmt_usd(self._bankroll)}  |  "
+                f"[bold]Half-Kelly[/bold]  |  "
+                f"[bold]{n}[/bold] opportunities  |  "
+                f"[bold]Deploy:[/bold] {_fmt_usd(total_bet)} "
+                f"({total_bet / self._bankroll:.0%})" if self._bankroll > 0 else "",
+                id="kelly-header",
+            )
+            yield DataTable(id="kelly-table", cursor_type="row")
+            yield Static("", id="kelly-detail")
+            yield Static(
+                "[dim]Navigate rows to see details. Press [bold]Esc[/bold] to close.[/dim]",
+                id="kelly-footer",
+            )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#kelly-table", DataTable)
+        table.add_columns("#", "Market", "Side", "Price", "p-hat", "Edge", "Kelly%", "Bet")
+        for i, opp in enumerate(self._opportunities[:20]):
+            table.add_row(
+                str(i + 1),
+                opp.market[:40],
+                opp.outcome,
+                f"${opp.market_price:.2f}",
+                f"{opp.p_hat:.2f}",
+                f"{opp.edge:+.1%}",
+                f"{opp.kelly_frac:.1%}",
+                _fmt_usd(opp.bet_size),
+            )
+            self._row_map[i] = i
+
+        if not self._opportunities:
+            detail = self.query_one("#kelly-detail", Static)
+            detail.update(
+                "[dim]No opportunities found above edge threshold.\n"
+                "Add more favorites or try a wider scan.[/dim]"
+            )
+
+    def on_data_table_row_highlighted(
+        self, event: DataTable.RowHighlighted
+    ) -> None:
+        if event.data_table.id != "kelly-table":
+            return
+        idx = self._row_map.get(event.cursor_row)
+        if idx is None or idx >= len(self._opportunities):
+            return
+        opp = self._opportunities[idx]
+
+        names = [f"{s.name} (#{s.rank})" for s in opp.signals[:4]]
+        if len(opp.signals) > 4:
+            names.append(f"+{len(opp.signals) - 4} more")
+
+        lines = [
+            f"[bold]{opp.market}[/bold]",
+            f"Buy [bold]{opp.outcome}[/bold] @ ${opp.market_price:.3f}  "
+            f"-> Bayesian p-hat: [bold]{opp.p_hat:.3f}[/bold]  "
+            f"Edge: [bold]{opp.edge:+.1%}[/bold]",
+            f"Kelly: {opp.kelly_frac:.1%} of bankroll = "
+            f"[bold]{_fmt_usd(opp.bet_size)}[/bold]  "
+            f"EV/dollar: {opp.ev_per_dollar:+.3f}"
+            + (f"  Liquidity: {_fmt_usd(opp.liquidity)}" if opp.liquidity > 0 else ""),
+            f"Signals from: {', '.join(names)}",
+        ]
+        self.query_one("#kelly-detail", Static).update("\n".join(lines))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -484,6 +715,8 @@ class PolyApp(App):
         Binding("f", "toggle_favorite", "Fav"),
         Binding("i", "show_favorites", "Favs"),
         Binding("a", "toggle_analysis", "Analysis"),
+        Binding("k", "kelly_scan", "Kelly"),
+        Binding("h", "show_help", "Help"),
     ]
 
     period: reactive[str] = reactive("all")
@@ -498,6 +731,7 @@ class PolyApp(App):
         self._position_by_row: dict[int, str] = {}  # row -> market_title
         self._market_info: dict[str, dict] = {}  # market_title -> detail dict
         self._open_markets: set[str] = set()  # market_titles of OPEN positions
+        self._trader_accuracy: float = 0.55
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -528,12 +762,14 @@ class PolyApp(App):
         # Set up positions table columns
         pos_table = self.query_one("#positions-table", DataTable)
         pos_table.add_column("", width=4)
-        pos_table.add_column("Market", width=40)
+        pos_table.add_column("Market", width=32)
         pos_table.add_column("Side")
         pos_table.add_column("Size", width=10)
         pos_table.add_column("Avg", width=7)
         pos_table.add_column("Cur", width=7)
         pos_table.add_column("PnL", width=10)
+        pos_table.add_column("Edge", width=6)
+        pos_table.add_column("Kelly", width=8)
 
         # Clear chart
         chart_widget = self.query_one("#pnl-chart", PlotextPlot)
@@ -609,6 +845,21 @@ class PolyApp(App):
             )
 
         lines.append(f"Net flow: {_fmt_usd(info['net_flow'])}  |  {info['first']} to {info['last']}")
+
+        # Kelly details for open positions
+        if "edge" in info:
+            bankroll = self.budget or 0
+            acc = getattr(self, "_trader_accuracy", 0.55)
+            kelly_line = (
+                f"[bold #e8a838]Kelly:[/bold #e8a838] "
+                f"win rate {acc:.0%} -> "
+                f"p-hat {info['p_hat']:.3f}  "
+                f"edge {info['edge']:+.1%}  "
+                f"fraction {info['kelly_frac']:.1%}"
+            )
+            if bankroll > 0:
+                kelly_line += f"  = [bold]{_fmt_usd(info['kelly_frac'] * bankroll)}[/bold] of {_fmt_usd(bankroll)}"
+            lines.append(kelly_line)
 
         widget.update("\n".join(lines))
 
@@ -696,6 +947,49 @@ class PolyApp(App):
                         break
 
         self.push_screen(FavoritesModal(), _on_dismiss)
+
+    def action_show_help(self) -> None:
+        self.push_screen(HelpModal())
+
+    def action_kelly_scan(self) -> None:
+        self.notify("Scanning for Kelly opportunities...")
+        self._run_kelly_scan()
+
+    @work(thread=True, exclusive=True, group="kelly")
+    def _run_kelly_scan(self) -> None:
+        bankroll = self.budget or 1000.0
+
+        # Build wallet list: favorites first, fall back to top leaderboard wallets
+        wallets = load_favorites()
+        if not wallets and self._wallets:
+            wallets = [
+                {
+                    "wallet": t.wallet,
+                    "name": t.name or t.wallet[:12],
+                    "rank": t.rank,
+                }
+                for t in self._wallets[:20]
+            ]
+
+        if not wallets:
+            self.call_from_thread(
+                self.notify, "No wallets to scan. Add favorites first.", severity="warning"
+            )
+            return
+
+        # Cross-reference favorites with leaderboard for rank data
+        rank_lookup = {t.wallet: t.rank for t in self._wallets}
+        for w in wallets:
+            if w["wallet"] in rank_lookup:
+                w["rank"] = rank_lookup[w["wallet"]]
+
+        opps = scan_opportunities(wallets, bankroll)
+        self.call_from_thread(self._show_kelly_results, opps, bankroll)
+
+    def _show_kelly_results(
+        self, opps: list[Opportunity], bankroll: float
+    ) -> None:
+        self.push_screen(KellyModal(opps, bankroll))
 
     # ------------------------------------------------------------------
     # Watchers
@@ -914,6 +1208,17 @@ class PolyApp(App):
         # Store PnL for chart highlighting
         self._current_pnl = pnl
 
+        # Compute trader's actual win rate for Kelly accuracy
+        metrics = _compute_metrics(pnl)
+        if metrics["total_markets"] > 0:
+            trader_acc = metrics["profitable_markets"] / metrics["total_markets"]
+        else:
+            trader_acc = 0.55
+        trader_acc = max(0.52, min(0.85, trader_acc))
+        self._trader_accuracy = trader_acc
+
+        bankroll = pnl.budget or self.budget or 0
+
         # Build position lookup from API data
         pos_by_market: dict[str, Position] = {}
         for p in positions:
@@ -978,6 +1283,24 @@ class PolyApp(App):
                     "cash_pnl": p.cash_pnl, "percent_pnl": p.percent_pnl,
                     "realized_pnl": p.realized_pnl,
                 })
+
+            # Kelly metrics for open positions
+            edge_str = ""
+            kelly_str = ""
+            if is_open and p and 0.01 < p.cur_price < 0.99:
+                p_hat = bayesian_update(p.cur_price, [(trader_acc, 0)])
+                edge = p_hat - p.cur_price
+                if edge > 0:
+                    kf = kelly_fraction(p_hat, p.cur_price, 0.5)
+                    edge_str = f"{edge:+.0%}"
+                    if bankroll > 0:
+                        kelly_str = _fmt_usd(kf * bankroll)
+                    else:
+                        kelly_str = f"{kf:.0%}"
+                    info["p_hat"] = p_hat
+                    info["edge"] = edge
+                    info["kelly_frac"] = kf
+
             self._market_info[market_title] = info
 
             side = p.outcome if p else ""
@@ -986,17 +1309,18 @@ class PolyApp(App):
             cur = f"${p.cur_price:.3f}" if p else ""
             rows.append((
                 status, market_title, side, size, avg, cur,
-                _fmt_usd(pnl_val), 0 if is_open else 1, abs(pnl_val),
+                _fmt_usd(pnl_val), edge_str, kelly_str,
+                0 if is_open else 1, abs(pnl_val),
             ))
 
         # Sort: OPEN first, then by |PnL| desc
-        rows.sort(key=lambda r: (r[7], -r[8]))
+        rows.sort(key=lambda r: (r[9], -r[10]))
 
         pos_table = self.query_one("#positions-table", DataTable)
         pos_table.clear()
         self._position_by_row = {}
         for i, row in enumerate(rows):
-            pos_table.add_row(*row[:7])
+            pos_table.add_row(*row[:9])
             self._position_by_row[i] = row[1]
 
     def _populate_chart(
